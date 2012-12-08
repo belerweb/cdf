@@ -435,9 +435,9 @@ Dashboards.blockUIwithDrag = function() {
   $.blockUI();
   var handle = $('<div id="blockUIDragHandle"></div>')
   $("div.blockUI.blockMsg").prepend(handle);
-  $("div.blockUI.blockMsg").draggable({
-    handle: "#blockUIDragHandle"
-  });
+  //$("div.blockUI.blockMsg").draggable({
+  //  handle: "#blockUIDragHandle"
+  //});
 };
 
 Dashboards.updateLifecycle = function(object) {
