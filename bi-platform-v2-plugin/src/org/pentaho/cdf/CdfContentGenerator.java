@@ -516,7 +516,7 @@ public class CdfContentGenerator extends BaseContentGenerator {
 
         out.write(intro.substring(0, headIndex + 6).getBytes(ENCODING));
         // Concat libraries to html head content
-        getHeaders(dashboardContent, requestParams, out);
+        // getHeaders(dashboardContent, requestParams, out);
         out.write(intro.substring(headIndex + 6, length).getBytes(ENCODING));
         // Add context
         generateContext(requestParams, out);
