@@ -373,6 +373,7 @@ public class CdfContentGenerator extends BaseContentGenerator {
 
         String templateName = null;
         String messagesBaseFilename = null;
+        boolean custom = false;
 
         if (repository.resourceExists(fullPath)) {
             final ActionResource resource = new ActionResource("", IActionSequenceResource.SOLUTION_FILE_RESOURCE, "text/xml", fullPath);
@@ -389,9 +390,14 @@ public class CdfContentGenerator extends BaseContentGenerator {
             if (doc.selectSingleNode("/cdf/style") != null) {
                 template = XmlDom4JHelper.getNodeText("/cdf/style", doc);
             }
+            
+            // If a "custom" tag exists, read that
+            if (doc.selectSingleNode("/cdf/custom") != null) {
+              custom = Boolean.parseBoolean(XmlDom4JHelper.getNodeText("/cdf/custom", doc));
+            }
         }
 
-        renderHtmlDashboard(requestParams, out, solution, path, templateName, template, messagesBaseFilename);
+        renderHtmlDashboard(requestParams, out, solution, path, templateName, template, messagesBaseFilename, custom);
 
     }
 
@@ -401,6 +407,16 @@ public class CdfContentGenerator extends BaseContentGenerator {
             final String templateName,
             String template,
             String dashboardsMessagesBaseFilename) throws Exception {
+        renderHtmlDashboard(requestParams, out, solution, path, templateName, template, dashboardsMessagesBaseFilename, false);
+    }
+      
+      public void renderHtmlDashboard(final IParameterProvider requestParams, final OutputStream out,
+                                      final String solution,
+                                      final String path,
+                                      final String templateName,
+                                      String template,
+                                      String dashboardsMessagesBaseFilename,
+                                      boolean custom) throws Exception {
 
         if (template == null || template.equals("")) {
             template = "";
@@ -516,7 +532,9 @@ public class CdfContentGenerator extends BaseContentGenerator {
 
         out.write(intro.substring(0, headIndex + 6).getBytes(ENCODING));
         // Concat libraries to html head content
-        // getHeaders(dashboardContent, requestParams, out);
+        if (!custom) {
+            getHeaders(dashboardContent, requestParams, out);
+        }
         out.write(intro.substring(headIndex + 6, length).getBytes(ENCODING));
         // Add context
         generateContext(requestParams, out);
