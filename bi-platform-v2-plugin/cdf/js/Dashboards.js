@@ -75,12 +75,18 @@ var Dashboards = {
   
   // Holder for context
   context:{},
+
   
-  /* measures, in miliseconds, the delay between firing blockUI and
-   * actually updating the dashboard. Necessary for IE/Chrome. Higher
-   * values have better chances of working, but are (obviously) slower
-   */
-  renderDelay: 300,
+  /* 
+   * Legacy dashboards don't have priority, so we'll assign a very low priority
+   * to them.
+   * */
+  
+  legacyPriority: -1000,
+  
+  /* Log lifecycle events? */
+  logLifecycle: true,
+  
   args: [],
   monthNames : ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'],
   /* Reference to current language code . Used in every place where jquery
@@ -363,7 +369,32 @@ Dashboards.bindControl = function(object) {
      * extend the input object with all the component methods,
      * and endow it with the Backbone event system.
      */
-    _.extend(object,objectImpl,Backbone.Events);
+    $.extend(object,objectImpl,Backbone.Events);
+    
+    // Add logging lifeCycle
+    
+      
+    var myself = this;
+    object.on("all",function(e){
+      
+      if( myself.logLifecycle &&  e !== "cdf" && this.name !=="PostInitMarker" && typeof console != "undefined" ){
+        
+        var eventName = e.substr(4);
+        var eventStr = "      ";
+        if (eventName==="preExecution")
+          eventStr = ">Start";
+        else if(eventName==="postExecution")
+          eventStr = "<End  ";
+        else if(eventName === "error")
+          eventStr = "!Error";
+        
+        
+        
+        var timeInfo = Mustache.render("Timing: {{elapsedSinceStartDesc}} since start, {{elapsedSinceStartDesc}} since last event",this.splitTimer());
+        console.log("%c          [Lifecycle " + eventStr + "] " + this.name + " (P: "+ this.priority +" ): " + 
+          e.substr(4) + " " + timeInfo +" (Running: "+ this.dashboard.runningCalls  +")","color: " + this.getLogColor());
+      }
+    })
   }
 };
 
@@ -453,7 +484,7 @@ Dashboards.updateLifecycle = function(object) {
       try {
         var shouldExecute;
         if(!(typeof(object.preExecution)=='undefined')){
-          var shouldExecute = object.preExecution.apply(object);
+          shouldExecute = object.preExecution.apply(object);
         }
         /*
          * If `preExecution` returns anything, we should use its truth value to
@@ -481,7 +512,6 @@ Dashboards.updateLifecycle = function(object) {
         // unsupported update call
         }
 
-        object.trigger('cdf cdf:postExecution', object);
         if(!(typeof(object.postExecution)=='undefined')){
           object.postExecution.apply(object);
         }
@@ -501,12 +531,38 @@ Dashboards.updateLifecycle = function(object) {
           this.decrementRunningCalls();
         }
       }
-  },this);
+
+      // Triggering the event for the rest of the process
+      object.trigger('cdf cdf:postExecution', object);
+
+  },this);  
   setTimeout(handler,1);
 };
 
 Dashboards.update = function(component) {
-  this.updateAll([component]);
+  /*
+   * It's not unusual to have several consecutive calls to `update` -- it can
+   * happen, e.g, as a result of using `DuplicateComponent` to clone a number
+   * of components. If we pass each update individually to `updateAll`, the
+   * first call will pass through directly, while the remaining calls will
+   * result in the components being queued up for update only after the first
+   * finished. To prevent this, we build a list of components waiting to be
+   * updated, and only pass those forward to `updateAll` if we haven't had any
+   * more calls within 5 miliseconds of the last.
+   */
+  if(!this.updateQueue){
+    this.updateQueue = [];
+  }
+  this.updateQueue.push(component);
+  if(this.updateTimeout) {
+    clearTimeout(this.updateTimeout);
+  }
+
+  var handler = _.bind(function(){
+    this.updateAll(this.updateQueue);
+    delete this.updateQueue;
+  },this);
+  this.updateTimeout = setTimeout(handler,5);
 };
 
 Dashboards.updateComponent = function(object) {
@@ -551,9 +607,16 @@ Dashboards.getComponentByName = function(name) {
 };
 
 Dashboards.addComponents = function(components) {
+  
   // attempt to convert over to component implementation
   for (var i =0; i < components.length; i++) {
     this.bindControl(components[i]);
+    
+    // For legacy dashboards, we'll automatically assign some priority for 
+    // component execution
+    if(typeof components[i].priority === "undefined" || components[i].priority === ""){
+      components[i].priority = this.legacyPriority++;
+    }
   }
   this.components = this.components.concat(components);
 };
@@ -702,7 +765,12 @@ Dashboards.syncParametersInit = function() {
 Dashboards.initEngine = function(){
   var myself = this;
   var components = this.components;
+
   this.incrementRunningCalls();
+  if( this.logLifecycle && typeof console != "undefined" ){
+    console.log("%c          [Lifecycle >Start] Init (Running: "+ this.runningCalls  +")","color: #ddd ");
+  }
+
   this.createAndCleanErrorDiv();
   // Fire all pre-initialization events
   if(typeof this.preInit == 'function') {
@@ -723,6 +791,23 @@ Dashboards.initEngine = function(){
     this.handlePostInit();
     return;
   }
+  
+  // Since we can get into racing conditions between last component's 
+  // preExecution and dashboard.postInit, we'll add a last component with very 
+  // low priority who's funcion is only to act as a marker.
+  var postInitComponent = {
+    name: "PostInitMarker",
+    type: "unmanaged",
+    lifecycle: {
+      silent: true
+    },
+    executeAtStart: true,
+    priority:999999999
+  };
+  this.bindControl(postInitComponent)
+  updating.push(postInitComponent);
+  
+  
   this.waitingForInit = updating.slice();
 
   var callback = function(comp,isExecuting) {
@@ -739,22 +824,19 @@ Dashboards.initEngine = function(){
     this.waitingForInit = _(this.waitingForInit).without(comp);
     comp.off('cdf:postExecution',callback);
     comp.off('cdf:preExecution',callback);
+    comp.off('cdf:error',callback);
     this.handlePostInit();
   }
 
-  setTimeout(
-    function() {
-      for(var i= 0, len = updating.length; i < len; i++){
-        var component = updating[i];
-        component.on('cdf:postExecution cdf:preExecution',callback,myself);
-      }
-      Dashboards.updateAll(updating);
-      if(components.length > 0) {
-        myself.handlePostInit();
-      }
-    },
-    this.renderDelay
-  );
+  for(var i= 0, len = updating.length; i < len; i++){
+    var component = updating[i];
+    component.on('cdf:postExecution cdf:preExecution cdf:error',callback,myself);
+  }
+  Dashboards.updateAll(updating);
+  if(components.length > 0) {
+    myself.handlePostInit();
+  }
+
 };
 
 Dashboards.handlePostInit = function() {
@@ -768,7 +850,12 @@ Dashboards.handlePostInit = function() {
     }
     this.restoreDuplicates();
     this.finishedInit = true;
+    
     this.decrementRunningCalls();
+    if( this.logLifecycle && typeof console != "undefined" ){
+      console.log("%c          [Lifecycle <End  ] Init (Running: "+ this.runningCalls  +")","color: #ddd ");
+    }
+    
   }
 };
 
@@ -787,6 +874,9 @@ Dashboards.resetAll = function(){
 };
 
 Dashboards.processChange = function(object_name){
+  
+  //Dashboards.log("Processing change on " + object_name);
+  
   var object = this.getComponentByName(object_name);
   var parameter = object.parameter;
   var value;
@@ -838,11 +928,8 @@ Dashboards.fireChange = function(parameter, value) {
       }
     }
   }
-  setTimeout(function() {
-    for (var i = 0; i < toUpdate.length; i++) {
-      myself.update(toUpdate[i]);
-    }
-  }, this.renderDelay);
+  myself.updateAll(toUpdate);
+
 };
 
 
@@ -850,13 +937,20 @@ Dashboards.fireChange = function(parameter, value) {
  * are the priorities, and the values are arrays of components that should be
  * updated at that priority level:
  *
- *  {
- *    0: [c1,c2],
- *    2: [c3],
- *    10: [c4]
- *  }
+ *    {
+ *      0: [c1,c2],
+ *      2: [c3],
+ *      10: [c4]
+ *    }
  *
- *  Note that even though it expects numerical keys, 
+ * Alternatively, you can pass an array of components, `[c1, c2, c3]`, in which
+ * case the priority-keyed object will be created internally from the priority
+ * values the components declare for themselves.
+ *
+ * Note that even though `updateAll` expects `components` to have numerical
+ * keys, and that it does work if you pass it an array, `components` should be
+ * an object, rather than an array, so as to allow negative keys (and so that
+ * we can use it as a sparse array of sorts)
  */
 Dashboards.updateAll = function(components) {
   if(!this.updating) {
@@ -866,7 +960,7 @@ Dashboards.updateAll = function(components) {
     };
   }
   if(components && _.isArray(components) && !_.isArray(components[0])) {
-    var comps = [];
+    var comps = {};
     _.each(components,function(c) {
       var prio = c.priority || 0;
       if(!comps[prio]) {
@@ -886,17 +980,22 @@ Dashboards.updateAll = function(components) {
 
     var postExec = function(component,isExecuting) {
       /*
-       * The `preExecution` event will pass two arguments (the component proper
-       * and a flag telling us whether the preExecution test passed), so we can
-       * test for that, and check whether the component is executing or not.
-       * If it's not going to execute, we should queue up the next component
-       * right now. If it is, we shouldn't do anything.right now.
+       * We first need to figure out what event we're handling. `error` will
+       * pass the component, error message and caught exception (if any) to
+       * its event handler, while the `preExecution` event will pass two
+       * arguments (the component proper and a flag telling us whether the
+       * preExecution test passed).
+       *
+       * If we're not going to finish updating the component, either because
+       * `preExecution` cancelled the update, or because we're in an `error`
+       * event handler, we should queue up the next component right now.
        */
-      if(arguments.length == 2 && isExecuting) {
+      if(arguments.length == 2 && typeof isExecuting == "boolean" && isExecuting) {
         return;
       }
       component.off("cdf:postExecution",postExec);
       component.off("cdf:preExecution",postExec);
+      component.off("cdf:error",postExec);
       var current = this.updating.current;
       current.components = _.without(current.components, component);
       var tiers = this.updating.tiers;
@@ -904,14 +1003,20 @@ Dashboards.updateAll = function(components) {
       this.updateAll();
     }
     /*
-     * We need a copy of `this.updating.current.components` here so that we can
-     * update them all without having items removed from the list by calls to
-     * `postExec` made by synchronous components.
+     * Any synchronous components we update will edit the `current.components`
+     * list midway through this loop, so we need a separate copy of that list
+     * so as to avoid messing up the indices.
      */
     var comps = this.updating.current.components.slice();
     for(var i = 0; i < comps.length;i++) {
       component = comps[i];
-      component.on("cdf:postExecution cdf:preExecution",postExec,this);
+      // Start timer
+      component.startTimer();
+      component.on("cdf:postExecution cdf:preExecution cdf:error",postExec,this);
+      
+      // Logging this.updating. Uncomment if needed to trace issues with lifecycle
+      // Dashboards.log("Processing "+ component.name +" (priority " + this.updating.current.priority +"); Next in queue: " +
+      //  _(this.updating.tiers).map(function(v,k){return k + ": [" + _(v).pluck("name").join(",") + "]"}).join(", "));
       this.updateComponent(component);
     }
   }
@@ -943,7 +1048,7 @@ Dashboards.mergePriorityLists = function(target,source) {
   if(!source) {
     return;
   }
-  for(key in source) if (source.hasOwnProperty(key)) {
+  for(var key in source) if (source.hasOwnProperty(key)) {
     if(_.isArray(target[key])) {
       target[key] = _.union(target[key],source[key]);
     } else {
@@ -1021,9 +1126,9 @@ Dashboards.isBookmarkable = function(parameter) {
 
 
 Dashboards.generateBookmarkState = function() {
-  var params = {}
+  var params = {},
       bookmarkables = this.bookmarkables;
-  for (k in bookmarkables) if (bookmarkables.hasOwnProperty(k)) {
+  for (var k in bookmarkables) if (bookmarkables.hasOwnProperty(k)) {
     if (bookmarkables[k]) {
       params[k] = this.getParameterValue(k);
     }
@@ -1033,8 +1138,7 @@ Dashboards.generateBookmarkState = function() {
 
 Dashboards.persistBookmarkables = function(param) {
   var bookmarkables = this.bookmarkables,
-      params = {},
-      state;
+      params = {};
   /*
    * We don't want to update the hash if we were passed a
    * non-bookmarkable parameter (why bother?), nor is there
@@ -1065,7 +1169,7 @@ Dashboards.setBookmarkState = function(state) {
     query.bookmarkState = JSON.stringify(state);
     url = method + '?' + $.param(query);
     window.history.replaceState({},'',url);
-    this.deleteHashValue('bookmark')
+    this.deleteHashValue('bookmark');
   } else {
     this.setHashValue('bookmark',state);
   }
@@ -1093,8 +1197,7 @@ Dashboards.getBookmarkState = function() {
           pair[1] = decodeURIComponent(pair[1]);
           return pair;
       }),
-      params = this.propertiesArrayToObject(query),
-      bookmarkState;
+      params = this.propertiesArrayToObject(query);
   if(params.bookmarkState) {
     return JSON.parse(decodeURIComponent(params.bookmarkState.replace(/\+/g,' '))) || {};
   } else  {
@@ -1107,7 +1210,7 @@ Dashboards.restoreBookmarkables = function() {
   this.bookmarkables = this.bookmarkables || {};
   try {
     state = this.getBookmarkState().params;
-    for (k in state) if (state.hasOwnProperty(k)) {
+    for (var k in state) if (state.hasOwnProperty(k)) {
       this.setParameter(k,state[k]);
     }
   } catch (e) {
@@ -1134,7 +1237,7 @@ Dashboards.getViewParameters = function(){
   if(!this.viewParameters) return {};
   var params = this.viewParameters,
       ret = {};
-  for(p in params) if (params.hasOwnProperty(p)) {
+  for(var p in params) if (params.hasOwnProperty(p)) {
     if (params[p] == this.viewFlags.VIEW|| params[p] == this.viewFlags.UNBOUND) {
       ret[p] = this.getParameterValue(p);
     }
@@ -1150,7 +1253,7 @@ Dashboards.getUnboundParameters = function(){
   if(!this.viewParameters) return [];
   var params = this.viewParameters,
       ret = []
-  for(p in params) if (params.hasOwnProperty(p)) {
+  for(var p in params) if (params.hasOwnProperty(p)) {
     if (params[p] == this.viewFlags.UNBOUND) {
       ret.push(p);
     }
@@ -1165,7 +1268,7 @@ Dashboards.getParameterValue = function (parameterName) {
     }
     catch (e){
       this.error(e);
-      return undefined;
+      //return undefined;
     }
   } else {
     return this.parameters[parameterName];
@@ -1178,13 +1281,13 @@ Dashboards.getQueryParameter = function ( parameterName ) {
   var parameterName = parameterName + "=";
   if ( queryString.length > 0 ) {
     // Find the beginning of the string
-    begin = queryString.indexOf ( parameterName );
+    var begin = queryString.indexOf ( parameterName );
     // If the parameter name is not found, skip it, otherwise return the value
     if ( begin != -1 ) {
       // Add the length (integer) to the beginning
       begin += parameterName.length;
       // Multiple parameters are separated by the "&" sign
-      end = queryString.indexOf ( "&" , begin );
+      var end = queryString.indexOf ( "&" , begin );
       if ( end == -1 ) {
         end = queryString.length
       }
@@ -1219,7 +1322,7 @@ Dashboards.setParameter = function(parameterName, parameterValue) {
 Dashboards.post = function(url,obj){
 
   var form = '<form action="' + url + '" method="post">';
-  for(o in obj){
+  for(var o in obj){
 
     var v = (typeof obj[o] == 'function' ? obj[o]() : obj[o]);
 
@@ -1278,7 +1381,8 @@ Dashboards.ev = function(o){
 };
 
 Dashboards.callPentahoAction = function(obj, solution, path, action, parameters, callback ){
-  myself = this;
+  var myself = this;
+  
   // Encapsulate pentahoAction call
   // Dashboards.log("Calling pentahoAction for " + obj.type + " " + obj.name + "; Is it visible?: " + obj.visible);
   if(typeof callback == 'function'){
@@ -1312,11 +1416,9 @@ Dashboards.executeAjax = function( returnType, url, params, func ) {
         func(XMLHttpRequest.responseXML);
       },
       error: function (XMLHttpRequest, textStatus, errorThrown) {
-        this.log("Found error: " + XMLHttpRequest + " - " + textStatus + ", Error: " +  errorThrown,"error");
+        myself.log("Found error: " + XMLHttpRequest + " - " + textStatus + ", Error: " +  errorThrown,"error");
       }
-
-    }
-    );
+    });
   }
 	
   // Sync
@@ -1419,7 +1521,7 @@ Dashboards.fetchData = function(cd, params, callback) {
   this.log('Dashboards.fetchData() is deprecated. Use Query objects instead','warn');
   // Detect and handle CDA data sources
   if (cd != undefined && cd.dataAccessId != undefined) {
-    for (param in params) {
+    for (var param in params) {
       cd['param' + params[param][0]] = this.getParameterValue(params[param][1]);
     }
     $.post(webAppPath + "/content/cda/doQuery?", cd,
@@ -1514,7 +1616,7 @@ Dashboards.cleanStorage = function(){
 
 Dashboards.propertiesArrayToObject = function(pArray) {
   var obj = {};
-  for (p in pArray) if (pArray.hasOwnProperty(p)) {
+  for (var p in pArray) if (pArray.hasOwnProperty(p)) {
     var prop = pArray[p];
     obj[prop[0]] = prop[1];
   }
@@ -1523,11 +1625,49 @@ Dashboards.propertiesArrayToObject = function(pArray) {
 
 Dashboards.objectToPropertiesArray = function(obj) {
   var pArray = [];
-  for (key in obj) if (obj.hasOwnProperty(key)) {
+  for (var key in obj) if (obj.hasOwnProperty(key)) {
     pArray.push([key,obj[key]]);
   }
   return pArray;
 }
+
+/** 
+* Converts HSV to RGB value. 
+* 
+* @param {Integer} h Hue as a value between 0 - 360 degrees 
+* @param {Integer} s Saturation as a value between 0 - 100 % 
+* @param {Integer} v Value as a value between 0 - 100 % 
+* @returns {Array} The RGB values  EG: [r,g,b], [255,255,255] 
+*/  
+Dashboards.hsvToRgb = function (h,s,v) {  
+  
+    s = s / 100;
+    v = v / 100;
+  
+    var hi = Math.floor((h/60) % 6);  
+    var f = (h / 60) - hi;  
+    var p = v * (1 - s);  
+    var q = v * (1 - f * s);  
+    var t = v * (1 - (1 - f) * s);  
+  
+    var rgb = [];  
+  
+    switch (hi) {  
+        case 0: rgb = [v,t,p];break;  
+        case 1: rgb = [q,v,p];break;  
+        case 2: rgb = [p,v,t];break;  
+        case 3: rgb = [p,q,v];break;  
+        case 4: rgb = [t,p,v];break;  
+        case 5: rgb = [v,p,q];break;  
+    }  
+  
+    var r = Math.min(255, Math.round(rgb[0]*256)),  
+        g = Math.min(255, Math.round(rgb[1]*256)),  
+        b = Math.min(255, Math.round(rgb[2]*256));  
+  
+    return "rgb("+ [r,g,b].join(",")+")";  
+  
+}     
 
 /**
  *
@@ -1595,7 +1735,7 @@ var Utf8 = {
   decode : function (utftext) {
     var string = "";
     var i = 0;
-    var c = c1 = c2 = 0;
+    var c = 0, c2 = 0, c3 = 0;
 
     while ( i < utftext.length ) {
 
@@ -1632,7 +1772,7 @@ function getURLParameters(sURL)
     var arrURLParams = arrParams[1].split("&");
     var arrParam = [];
 
-    for (i=0;i<arrURLParams.length;i++){
+    for (var i=0;i<arrURLParams.length;i++){
       var sParam =  arrURLParams[i].split("=");
 
       if (sParam[0].indexOf("param",0) == 0){
@@ -1644,18 +1784,18 @@ function getURLParameters(sURL)
   }
 
   return arrParam;
-};
+}
 
 function toFormatedString(value) {
   value += '';
-  x = value.split('.');
-  x1 = x[0];
-  x2 = x.length > 1 ? '.' + x[1] : '';
+  var x = value.split('.');
+  var x1 = x[0];
+  var x2 = x.length > 1 ? '.' + x[1] : '';
   var rgx = /(\d+)(\d{3})/;
   while (rgx.test(x1))
     x1 = x1.replace(rgx, '$1' + ',' + '$2');
   return x1 + x2;
-};
+}
 
 //quote csv values in a way compatible with CSVTokenizer
 function doCsvQuoting(value, separator, alwaysEscape){
@@ -1675,7 +1815,7 @@ function doCsvQuoting(value, separator, alwaysEscape){
     value =  QUOTE_CHAR.concat(value, QUOTE_CHAR);
   }
   return value;
-};
+}
 
 /**
 *
@@ -1712,7 +1852,7 @@ sprintfWrapper = {
     var newString = '';
     var match = null;
 
-    while (match = exp.exec(string)) {
+    while ((match = exp.exec(string))) {
       if (match[9]) {
         convCount += 1;
       }
@@ -1723,8 +1863,8 @@ sprintfWrapper = {
 
       matchPosEnd = exp.lastIndex;
       
-      var negative = parseInt(arguments[convCount]) < 0 ? true : false;
-      if(negative == 0) negative = parseFloat(arguments[convCount]) < 0 ? true : false;
+      var negative = parseInt(arguments[convCount]) < 0;
+      if(!negative) negative = parseFloat(arguments[convCount]) < 0;
       
       matches[matches.length] = {
         match: match[0],
@@ -1747,13 +1887,12 @@ sprintfWrapper = {
       return null;
     }
 
-    var code = null;
-    var match = null;
+    match = null;
     var i = null;
 
     for (i=0; i<matches.length; i++) {
       var m =matches[i];
-
+      var substitution;
       if (m.code == '%') {
         substitution = '%'
       }
@@ -1795,8 +1934,8 @@ sprintfWrapper = {
 
       newString += strings[i];
       newString += substitution;
-
     }
+    
     newString += strings[i];
 
     return newString;
@@ -1880,7 +2019,7 @@ Dashboards.listAddIns = function(component,slot) {
 var key = this.normalizeAddInKey(component);
   var addInList = [];
   try {
-    var slot = this.addIns[key][slot];
+    slot = this.addIns[key][slot];
     for (var addIn in slot) if (slot.hasOwnProperty(addIn)) { 
       addInList.push([addIn, slot[addIn].getLabel()]);
     }
@@ -2080,14 +2219,13 @@ Query = function() {
     };
 
     var settings = _.extend({},_ajaxOptions, {
-      success: function() {},
       data: queryDefinition,
       url: url,
       success: successHandler
     });
     
     $.ajax(settings);
-  };
+  }
 
   function buildQueryDefinition(overrides) {
     overrides = overrides || {};
@@ -2116,7 +2254,7 @@ Query = function() {
     queryDefinition.pageStart = _page;
     queryDefinition.sortBy = _sortBy;
     return queryDefinition;
-  };
+  }
 
   /*
    * Public interface
@@ -2137,7 +2275,7 @@ Query = function() {
     if (options.filename) {
       queryDefinition.settingattachmentName= options.filename ;
     }
-    if (outputType = 'xls' && options.template) {
+    if (outputType == 'xls' && options.template) {
       queryDefinition.settingtemplateName= options.template ;
     }
     if( options.columnHeaders ){
@@ -2221,7 +2359,7 @@ Query = function() {
     }
   };
 
-  this.reprocessResults = function(outerCallback) {
+  this.reprocessResults = function(outsideCallback) {
     if (_lastResultSet !== null) {
       var clone = Dashboards.safeClone(true,{},_lastResultSet);
       var callback = (outsideCallback ? outsideCallback : _callback);

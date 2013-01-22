@@ -28,7 +28,6 @@ var BaseCccComponent = UnmanagedComponent.extend({
     
     query: null,
     chart: null,
-    
       
     exportChart: function(outputType, overrides) {
         
@@ -72,9 +71,41 @@ var BaseCccComponent = UnmanagedComponent.extend({
         _exportIframe.detach();
         _exportIframe[0].src = "../cgg/draw?" + $.param(chartDefinition);
         _exportIframe.appendTo($('body'));
-    }
+    },
     
-})
+    _preProcessChartDefinition: function(){
+        var chartDef = this.chartDefinition;
+        if(chartDef){
+            // Obtain effective compatVersion
+            var compatVersion = chartDef.compatVersion;
+            if(compatVersion == null){
+                compatVersion = typeof pvc.defaultCompatVersion === 'function' ? 
+                                pvc.defaultCompatVersion() :
+                                1;
+            }
+            
+            if(compatVersion <= 1){
+                // Properties that are no more registered in the component
+                // and that had a name mapping.
+                // The default mapping, for unknown properties, doesn't work.
+                if('showLegend' in chartDef){
+                    chartDef.legend = chartDef.showLegend;
+                    delete chartDef.showLegend;
+                }
+                
+                // Don't presume chartDef props must be own
+                for(var p in chartDef){
+                    var m = /^barLine(.*)$/.exec(p);
+                    if(m){
+                        p2 = 'secondAxis' + (m[1] || '');
+                        chartDef[p2] = chartDef[p];
+                        delete chartDef[p];
+                    }
+                } 
+            }
+        }
+    }
+});
 
 var CccComponent = BaseCccComponent.extend({
 
@@ -123,7 +154,9 @@ var CccComponent = BaseCccComponent.extend({
     render: function(values) {
 
         $("#" + this.htmlObject).append('<div id="'+ this.htmlObject  +'protovis"></div>');
-
+        
+        this._preProcessChartDefinition();
+        
         var o = $.extend({},this.chartDefinition);
         o.canvas = this.htmlObject+'protovis';
         // Extension points
@@ -134,6 +167,7 @@ var CccComponent = BaseCccComponent.extend({
             });
             o.extensionPoints=ep;
         }
+        
         this.chart =  new this.cccType(o);
         if(arguments.length > 0){
             this.chart.setData(values,{
@@ -229,6 +263,8 @@ var CccComponent2 = BaseCccComponent.extend({
 
         $("#" + this.htmlObject).append('<div id="'+ this.htmlObject  +'protovis"></div>');
 
+        this._preProcessChartDefinition();
+        
         var o = $.extend({},this.chartDefinition);
         o.canvas = this.htmlObject+'protovis';
         // Extension points
@@ -251,6 +287,17 @@ var CccComponent2 = BaseCccComponent.extend({
 
 });
 
+
+var CccAreaChartComponent = CccComponent.extend({
+
+    cccType: pvc.AreaChart
+
+});
+
+var CccStackedDotChart = CccComponent.extend({
+
+    cccType: pvc.StackedDotChart
+});
 
 var CccDotChartComponent = CccComponent.extend({
 
